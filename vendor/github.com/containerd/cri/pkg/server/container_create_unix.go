@@ -249,9 +249,37 @@ func (c *criService) containerSpec(id string, sandboxID string, sandboxPid uint3
 		specOpts = append(specOpts, customopts.WithAnnotation(pKey, pValue))
 	}
 
+	specOpts = append(specOpts, customopts.WithPodNamespaces(securityContext, sandboxPid))
+
+	if securityContext.GetNamespaceOptions().GetPid() == runtime.NamespaceMode_TARGET {
+		targetContainerID := securityContext.GetNamespaceOptions().TargetId
+		targetContainer, err := c.containerStore.Get(targetContainerID)
+		if err != nil {
+			return nil, errors.Wrapf(err, "failed to find target container %q", targetContainerID)
+		}
+
+		if targetContainer.Metadata.SandboxID != sandboxID {
+			return nil, errors.Errorf("target container belongs to a different sandbox")
+		}
+
+		status := targetContainer.Status.Get()
+		if state := status.State(); state != runtime.ContainerState_CONTAINER_RUNNING {
+			return nil, errors.Errorf("target container is in state %s", state)
+		}
+
+		targetPid := status.Pid
+
+		// Overwrite the PID namespace with the namespace of the target container.
+		specOpts = append(specOpts, oci.WithLinuxNamespace(
+			runtimespec.LinuxNamespace{
+				Type: runtimespec.PIDNamespace,
+				Path: customopts.GetPIDNamespace(targetPid),
+			}),
+		)
+	}
+
 	specOpts = append(specOpts,
 		customopts.WithOOMScoreAdj(config, c.config.RestrictOOMScoreAdj),
-		customopts.WithPodNamespaces(securityContext, sandboxPid),
 		customopts.WithSupplementalGroups(supplementalGroups),
 		customopts.WithAnnotation(annotations.ContainerType, annotations.ContainerTypeContainer),
 		customopts.WithAnnotation(annotations.SandboxID, sandboxID),
